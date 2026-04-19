@@ -51,6 +51,7 @@ from .ArtiaX import (
     OPTIONS_GEOMODEL_CHANGED,
     OPTIONS_PARTLIST_CHANGED
 )
+from .plugin import PluginWidget
 
 
 def slider_to_value(slider_value, slider_max, min, max):
@@ -109,6 +110,7 @@ class OptionsWindow(ToolInstance):
         self._build_visualization_widget()
         self._build_manipulation_widget()
         self._build_reorient_widget()
+        self._build_plugin_widget()
 
         # Build the final gui
         self._build_full_ui()
@@ -175,11 +177,13 @@ class OptionsWindow(ToolInstance):
         self.tabs.addTab(self.manip_area, 'Select/Manipulate')
         self.tabs.addTab(self.reorient_area, 'Reorient')
         self.tabs.addTab(self.geomodel_area, 'Geometric Model')
+        self.tabs.addTab(self.plugin_area, 'Plugin')
         self.tabs.widget(0).setEnabled(False)
         self.tabs.widget(1).setEnabled(False)
         self.tabs.widget(2).setEnabled(False)
         self.tabs.widget(3).setEnabled(False)
         self.tabs.widget(4).setEnabled(False)
+        # Plugin tab (index 5) is independent of any selection; stays enabled.
         self.tabs.setCurrentIndex(0)
         self.main_layout.addWidget(self.tabs)
 
@@ -2057,6 +2061,13 @@ class OptionsWindow(ToolInstance):
             closest_part = particles[closest_index]
             new_pl.new_particle(closest_part.origin, closest_part.translation, closest_part.rotation)
             part_index = closest_index
+
+    # ==============================================================================
+    # Options Menu for Plugin ======================================================
+    # ==============================================================================
+
+    def _build_plugin_widget(self):
+        self.plugin_area = PluginWidget(self.session, font=self.font)
 
     # ==============================================================================
     # Options Menu for Geometric Models ============================================

@@ -14,6 +14,46 @@ Features include:
 
 Read the companion paper on [bioRxiv](https://www.biorxiv.org/content/10.1101/2022.07.26.501574v1).
 
+## AIS2star plugin
+
+This fork ships a **Plugin** tab inside ArtiaX Options that drives the AIS2star
+`fiber2star` / `mem2star` pipelines in a user-selected conda env (CUDA via
+cupy / cucim), auto-opens each step's debug MRC, and loads the final STAR as
+a ParticleList with per-connected-component select / edit / save. Suitable
+for filament and membrane segmentation from cryo-ET tomograms. Developers
+looking to extend it should read [PLUGIN_PLAN.md](PLUGIN_PLAN.md) for the
+architecture, step schemas, and Qt traps.
+
+<p align="center">
+  <img src="src/plugin/ais2star/AIS2star.png" height="220" />
+  <img src="src/plugin/ais2star/processedmask.png" height="220" />
+</p>
+
+### Install the plugin
+
+Requires ChimeraX ≥ 1.3 and an NVIDIA GPU with the CUDA 13 driver (≥ 580.x)
+available on the host.
+
+**1 — Install the ArtiaX2star bundle into ChimeraX.** `devel install`
+symlinks the source, so further edits need only a ChimeraX restart:
+```bash
+git clone https://github.com/huwl404/ArtiaX2star.git
+chimerax --cmd "devel install /path/to/ArtiaX2star ; exit"
+```
+
+**2 — Create the GPU conda env the Plugin tab will call.** The heavy
+`cupy` / `cucim` work runs in a separate env (kept out of ChimeraX's Python
+to avoid CUDA / ABI conflicts). Pinned versions live in
+[`src/plugin/ais2star/requirements.txt`](src/plugin/ais2star/requirements.txt):
+```bash
+conda create -n ais2star python=3.12 -y
+conda activate ais2star
+pip install -r src/plugin/ais2star/requirements.txt
+```
+Point the Plugin tab's **Environment** picker at this env's
+`python` (e.g. `~/miniconda3/envs/ais2star/bin/python`) and click **Test env**
+— it probes for CUDA, cupy, cucim, mrcfile, and starfile.
+
 # Install ArtiaX
 
 ## Using the ChimeraX toolshed
