@@ -1,9 +1,11 @@
 # vim: set expandtab shiftwidth=4 softtabstop=4:
 """Connected-components panel: horizontal CC table + edit/delete/save actions.
 
-Binds to the current ArtiaX active ParticleList (one at a time). Column-select
-in the table mirrors into `partlist.selected_particles` (a boolean numpy mask)
-so the 3D view highlights the same particles, matching right-click select.
+Binds to the current ArtiaX active ParticleList (one at a time). The source
+of truth for edit/delete is `partlist.selected_particles` (a boolean numpy
+mask), so right-click single-particle picks and box-selects in the 3D view
+are respected alongside CC column clicks. Column-select in the table is a
+shortcut: it overwrites the mask with every particle in those CCs.
 
 Delete routes through `partlist.delete_data(ids)` — the high-level API that
 cleans up `_map`, `_data`, markers, and the collection model atomically.
@@ -34,6 +36,7 @@ from Qt.QtWidgets import (
 
 from . import star_io
 from ..ArtiaX import SEL_PARTLIST_CHANGED
+from ..particle.SurfaceCollectionModel import MODELS_SELECTED
 
 
 class _CCModel(QAbstractTableModel):
@@ -84,6 +87,12 @@ class ConnectedComponentsPanel(QGroupBox):
         self.session = session
         self._append = append_log
         self._groups: Dict[int, List] = {}
+        # Track which ParticleList's collection_model we're subscribed to so
+        # we can cleanly unsubscribe when the active list changes. Without
+        # this, right-click selections on an old list would still update the
+        # panel after the user switched away.
+        self._watched_pl = None
+        self._sel_handler = None
         self._build_ui()
         self.session.ArtiaX.triggers.add_handler(
             SEL_PARTLIST_CHANGED, self._on_partlist_changed
@@ -113,9 +122,7 @@ class ConnectedComponentsPanel(QGroupBox):
         self._table.setHorizontalScrollMode(QAbstractItemView.ScrollPerPixel)
         layout.addWidget(self._table)
 
-        self._summary = QLabel("Selection: 0 CCs · 0 particles")
-        layout.addWidget(self._summary)
-        self._table.selectionModel().selectionChanged.connect(self._on_selection_changed)
+        self._table.selectionModel().selectionChanged.connect(self._on_cc_selection_changed)
 
         # Edit row. Tooltips live on both labels and spinboxes so hovering
         # anywhere along the pair surfaces the help.
@@ -144,8 +151,14 @@ class ConnectedComponentsPanel(QGroupBox):
         edit_row.addWidget(self._flip_cb)
         layout.addLayout(edit_row)
 
-        # Single action row: 4 buttons evenly distributed.
+        # Single action row: selection summary on the left, actions on the
+        # right. The summary tracks pl.selected_particles rather than the CC
+        # table, so right-click / box-select in the 3D view flow through it
+        # and the subsequent Apply / Delete act on exactly those particles.
         act_row = QHBoxLayout()
+        self._summary = QLabel("Selection: 0 particles")
+        act_row.addWidget(self._summary)
+        act_row.addStretch(1)
         self._apply_btn = QPushButton("Apply edits")
         self._apply_btn.clicked.connect(self._on_apply_edits)
         self._delete_btn = QPushButton("Delete")
@@ -155,15 +168,10 @@ class ConnectedComponentsPanel(QGroupBox):
         self._save_btn.clicked.connect(self._on_save)
         self._save_as_btn = QPushButton("Save As…")
         self._save_as_btn.clicked.connect(self._on_save_as)
-        act_row.addStretch(1)
         act_row.addWidget(self._apply_btn)
-        act_row.addStretch(1)
         act_row.addWidget(self._delete_btn)
-        act_row.addStretch(1)
         act_row.addWidget(self._save_btn)
-        act_row.addStretch(1)
         act_row.addWidget(self._save_as_btn)
-        act_row.addStretch(1)
         layout.addLayout(act_row)
 
         self.setLayout(layout)
@@ -191,17 +199,46 @@ class ConnectedComponentsPanel(QGroupBox):
         self._refresh()
 
     def _refresh(self) -> None:
+        # Drop any subscription on the previously-watched list first. Without
+        # this, switching ParticleLists would leak handlers and stale lists
+        # would keep updating this panel's summary.
+        self._unwatch_current_pl()
+
         pl = self._active_partlist()
         if pl is None:
             self._groups = {}
             self._model.clear()
             self._autofit_table_height()
-            self._on_selection_changed()
+            self._update_summary()
             return
         self._groups = star_io.group_particles_by_cc(pl)
         self._model.set_rows([(cc, len(pids)) for cc, pids in self._groups.items()])
         self._autofit_table_height()
-        self._on_selection_changed()
+
+        # Subscribe to the new list's selection trigger. MODELS_SELECTED
+        # fires for right-click picks, box-select, and also for our own
+        # CC-driven writes to pl.selected_particles, so one handler covers
+        # every path that changes the mask.
+        self._watched_pl = pl
+        self._sel_handler = pl.collection_model.triggers.add_handler(
+            MODELS_SELECTED, self._on_pl_selection_changed
+        )
+        self._update_summary()
+
+    def _unwatch_current_pl(self) -> None:
+        if self._watched_pl is None or self._sel_handler is None:
+            self._watched_pl = None
+            self._sel_handler = None
+            return
+        try:
+            self._watched_pl.collection_model.triggers.remove_handler(
+                self._sel_handler
+            )
+        except Exception:
+            # Old collection_model may already be gone; ignore.
+            pass
+        self._watched_pl = None
+        self._sel_handler = None
 
     def _autofit_table_height(self) -> None:
         """Pin the table height to exactly 2 content rows (+ frame, + hscrollbar
@@ -224,34 +261,57 @@ class ConnectedComponentsPanel(QGroupBox):
         return [self._model.cc_id_at_column(idx.column()) for idx in cols]
 
     def _selected_particle_ids(self) -> List:
-        out: List = []
-        for cc in self._selected_cc_ids():
-            out.extend(self._groups.get(cc, []))
-        return out
+        """Particles currently selected in ArtiaX — the source of truth for
+        Apply / Delete. This is ``pl.selected_particles`` itself, so
+        right-click and box-select picks in the 3D view are honoured and
+        cross-CC selections are legal."""
+        pl = self._active_partlist()
+        if pl is None or pl.size == 0:
+            return []
+        mask = pl.selected_particles
+        if mask is None:
+            return []
+        return list(pl.particle_ids[mask])
 
-    def _on_selection_changed(self, *_args) -> None:
-        pids = self._selected_particle_ids()
-        n_ccs = len(self._selected_cc_ids())
-        self._summary.setText(f"Selection: {n_ccs} CCs · {len(pids)} particles")
-        # Mirror the table selection onto the ParticleList → highlights in the
-        # 3D view, same effect as right-click-select in ChimeraX.
+    def _on_cc_selection_changed(self, *_args) -> None:
+        """CC column click → overwrite pl.selected_particles with every
+        particle in those CCs. The resulting MODELS_SELECTED trigger will
+        then refresh the summary via ``_on_pl_selection_changed``."""
         pl = self._active_partlist()
         if pl is None or pl.size == 0:
             return
-        all_ids = pl.particle_ids  # numpy array of uuid strings, ordered
-        # Dict lookup stays O(1) per particle, so building the mask is O(N+M)
-        # regardless of partlist size — faster than `pid in set` iteration for
-        # 50k+ particles, and faster than np.isin over object-dtype arrays.
-        pos = {pid: i for i, pid in enumerate(all_ids)}
+        cc_ids = self._selected_cc_ids()
+        all_ids = pl.particle_ids
         mask = np.zeros(len(all_ids), dtype=bool)
-        for pid in pids:
-            idx = pos.get(pid)
-            if idx is not None:
-                mask[idx] = True
+        if cc_ids:
+            # Dict lookup stays O(1) per particle, so building the mask is
+            # O(N+M) regardless of partlist size — faster than ``pid in set``
+            # iteration for 50k+ particles, and faster than ``np.isin`` over
+            # object-dtype arrays.
+            pos = {pid: i for i, pid in enumerate(all_ids)}
+            for cc in cc_ids:
+                for pid in self._groups.get(cc, []):
+                    idx = pos.get(pid)
+                    if idx is not None:
+                        mask[idx] = True
         try:
             pl.selected_particles = mask
         except Exception as exc:
             self._append(f"[warn] failed to sync selection: {exc}\n")
+
+    def _on_pl_selection_changed(self, _name, _data) -> None:
+        # Fired by the ParticleList's collection_model whenever its selection
+        # mask changes — whether from a CC click above, a right-click pick,
+        # or a box-select in the 3D view.
+        self._update_summary()
+
+    def _update_summary(self) -> None:
+        pl = self._active_partlist()
+        if pl is None or pl.size == 0 or pl.selected_particles is None:
+            n = 0
+        else:
+            n = int(np.count_nonzero(pl.selected_particles))
+        self._summary.setText(f"Selection: {n} particles")
 
     # ----------------------------------------------------------- actions
 
@@ -262,7 +322,7 @@ class ConnectedComponentsPanel(QGroupBox):
             return
         pids = self._selected_particle_ids()
         if not pids:
-            self._append("(no CC selected)\n")
+            self._append("(no particles selected)\n")
             return
 
         shift_z = float(self._shift_z_spin.value())
@@ -308,7 +368,7 @@ class ConnectedComponentsPanel(QGroupBox):
             return
         pids = self._selected_particle_ids()
         if not pids:
-            self._append("(no CC selected)\n")
+            self._append("(no particles selected)\n")
             return
         # Use the high-level delete that cleans up _map + markers + collection
         # model atomically; pl.data.delete_particles(…) alone leaves stale

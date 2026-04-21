@@ -25,8 +25,7 @@ looking to extend it should read [PLUGIN_PLAN.md](PLUGIN_PLAN.md) for the
 architecture, step schemas, and Qt traps.
 
 <p align="center">
-  <img src="src/plugin/ais2star/AIS2star.png" height="220" />
-  <img src="src/plugin/ais2star/processedmask.png" height="220" />
+  <img src="src/plugin/ais2star/AIS2star.png"/>
 </p>
 
 ### Install the plugin
